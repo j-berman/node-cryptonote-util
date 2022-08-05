@@ -14,3 +14,5 @@
 
 #define CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW            60
 #define CRYPTONOTE_DISPLAY_DECIMAL_POINT                12
+
+#define HF_VERSION_VIEW_TAGS                    15

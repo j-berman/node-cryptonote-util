@@ -624,7 +624,8 @@ bool blockchain_storage::create_block_template(block& b, const account_public_ad
      block size, so first miner transaction generated with fake amount of money, and with phase we know think we know expected block size
   */
   //make blocks coin-base tx looks close to real coinbase tx to get truthful blob size
-  bool r = construct_miner_tx(height, median_size, already_generated_coins, txs_size, fee, miner_address, b.miner_tx, ex_nonce, 11);
+  uint8_t hf_version = b.major_version;
+  bool r = construct_miner_tx(height, median_size, already_generated_coins, txs_size, fee, miner_address, b.miner_tx, ex_nonce, 11, hf_version);
   CHECK_AND_ASSERT_MES(r, false, "Failed to construc miner tx, first chance");
   size_t cumulative_size = txs_size + get_object_blobsize(b.miner_tx);
 #if defined(DEBUG_CREATE_BLOCK_TEMPLATE)
@@ -632,7 +633,7 @@ bool blockchain_storage::create_block_template(block& b, const account_public_ad
     ", cumulative size " << cumulative_size);
 #endif
   for (size_t try_count = 0; try_count != 10; ++try_count) {
-    r = construct_miner_tx(height, median_size, already_generated_coins, cumulative_size, fee, miner_address, b.miner_tx, ex_nonce, 11);
+    r = construct_miner_tx(height, median_size, already_generated_coins, cumulative_size, fee, miner_address, b.miner_tx, ex_nonce, 11, hf_version);
 
     CHECK_AND_ASSERT_MES(r, false, "Failed to construc miner tx, second chance");
     size_t coinbase_blob_size = get_object_blobsize(b.miner_tx);
@@ -905,7 +906,8 @@ bool blockchain_storage::add_out_to_get_random_outs(std::vector<std::pair<crypto
   CHECK_AND_ASSERT_MES(tx_it->second.tx.vout.size() > amount_outs[i].second, false, "internal error: in global outs index, transaction out index="
     << amount_outs[i].second << " more than transaction outputs = " << tx_it->second.tx.vout.size() << ", for tx id = " << amount_outs[i].first);
   transaction& tx = tx_it->second.tx;
-  CHECK_AND_ASSERT_MES(tx.vout[amount_outs[i].second].target.type() == typeid(txout_to_key), false, "unknown tx out type");
+  crypto::public_key output_public_key;
+  CHECK_AND_ASSERT_MES(get_output_public_key(tx.vout[amount_outs[i].second], output_public_key), false, "failed to get tx output public key");
 
   //check if transaction is unlocked
   if(!is_tx_spendtime_unlocked(tx.unlock_time))
@@ -913,7 +915,7 @@ bool blockchain_storage::add_out_to_get_random_outs(std::vector<std::pair<crypto
 
   COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& oen = *result_outs.outs.insert(result_outs.outs.end(), COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry());
   oen.global_amount_index = i;
-  oen.out_key = boost::get<txout_to_key>(tx.vout[amount_outs[i].second].target).key;
+  oen.out_key = output_public_key;
   return true;
 }
 //------------------------------------------------------------------
@@ -1191,8 +1193,9 @@ bool blockchain_storage::get_outs(uint64_t amount, std::list<crypto::public_key>
     auto tx_it = m_transactions.find(out_entry.first);
     CHECK_AND_ASSERT_MES(tx_it != m_transactions.end(), false, "transactions outs global index consistency broken: wrong tx id in index");
     CHECK_AND_ASSERT_MES(tx_it->second.tx.vout.size() > out_entry.second, false, "transactions outs global index consistency broken: index in tx_outx more then size");
-    CHECK_AND_ASSERT_MES(tx_it->second.tx.vout[out_entry.second].target.type() == typeid(txout_to_key), false, "transactions outs global index consistency broken: index in tx_outx more then size");
-    pkeys.push_back(boost::get<txout_to_key>(tx_it->second.tx.vout[out_entry.second].target).key);
+    crypto::public_key output_public_key;
+    CHECK_AND_ASSERT_MES(get_output_public_key(tx_it->second.tx.vout[out_entry.second], output_public_key), false, "failed to get tx output public key");
+    pkeys.push_back(output_public_key);
   }
 
   return true;
@@ -1383,13 +1386,14 @@ bool blockchain_storage::check_tx_input(const txin_to_key& txin, const crypto::h
         return false;
       }
 
-      if(out.target.type() != typeid(txout_to_key))
+      crypto::public_key output_public_key;
+      if(!get_output_public_key(out, output_public_key))
       {
-        LOG_PRINT_L0("Output have wrong type id, which=" << out.target.which());
+        LOG_PRINT_L0("Failed to get output public key");
         return false;
       }
 
-      m_results_collector.push_back(&boost::get<txout_to_key>(out.target).key);
+      m_results_collector.push_back(&output_public_key);
       return true;
     }
   };

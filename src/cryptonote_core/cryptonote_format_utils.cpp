@@ -55,7 +55,7 @@ namespace cryptonote
     return true;
   }
   //---------------------------------------------------------------
-  bool construct_miner_tx(size_t height, size_t median_size, uint64_t already_generated_coins, size_t current_block_size, uint64_t fee, const account_public_address &miner_address, transaction& tx, const blobdata& extra_nonce, size_t max_outs) {
+  bool construct_miner_tx(size_t height, size_t median_size, uint64_t already_generated_coins, size_t current_block_size, uint64_t fee, const account_public_address &miner_address, transaction& tx, const blobdata& extra_nonce, size_t max_outs, uint8_t hard_fork_version) {
     tx.vin.clear();
     tx.vout.clear();
     tx.extra.clear();
@@ -104,12 +104,17 @@ namespace cryptonote
       r = crypto::derive_public_key(derivation, no, miner_address.m_spend_public_key, out_eph_public_key);
       CHECK_AND_ASSERT_MES(r, false, "while creating outs: failed to derive_public_key(" << derivation << ", " << no << ", "<< miner_address.m_spend_public_key << ")");
 
-      txout_to_key tk;
-      tk.key = out_eph_public_key;
+      uint64_t amount = out_amounts[no];
+      summary_amounts += amount;
+
+      bool use_view_tags = hard_fork_version >= HF_VERSION_VIEW_TAGS;
+      crypto::view_tag view_tag;
+      if (use_view_tags)
+        crypto::derive_view_tag(derivation, no, view_tag);
 
       tx_out out;
-      summary_amounts += out.amount = out_amounts[no];
-      out.target = tk;
+      cryptonote::set_tx_out(amount, out_eph_public_key, use_view_tags, view_tag, out);
+
       tx.vout.push_back(out);
     }
 
@@ -477,13 +482,13 @@ namespace cryptonote
   {
     BOOST_FOREACH(const tx_out& out, tx.vout)
     {
-      CHECK_AND_ASSERT_MES(out.target.type() == typeid(txout_to_key), false, "wrong variant type: "
-        << out.target.type().name() << ", expected " << typeid(txout_to_key).name()
-        << ", in transaction id=" << get_transaction_hash(tx));
+      crypto::public_key output_public_key;
+      CHECK_AND_ASSERT_MES(get_output_public_key(out, output_public_key), false,
+        "failed to get output public key in transaction id=" << get_transaction_hash(tx));
 
       CHECK_AND_NO_ASSERT_MES(0 < out.amount, false, "zero amount ouput in transaction id=" << get_transaction_hash(tx));
 
-      if(!check_key(boost::get<txout_to_key>(out.target).key))
+      if(!check_key(output_public_key))
         return false;
     }
     return true;
@@ -527,6 +532,23 @@ namespace cryptonote
     return outputs_amount;
   }
   //---------------------------------------------------------------
+  bool get_output_public_key(const cryptonote::tx_out& out, crypto::public_key& output_public_key)
+  {
+    // before HF_VERSION_VIEW_TAGS, outputs with public keys are of type txout_to_key
+    // after HF_VERSION_VIEW_TAGS, outputs with public keys are of type txout_to_tagged_key
+    if (out.target.type() == typeid(txout_to_key))
+      output_public_key = boost::get< txout_to_key >(out.target).key;
+    else if (out.target.type() == typeid(txout_to_tagged_key))
+      output_public_key = boost::get< txout_to_tagged_key >(out.target).key;
+    else
+    {
+      LOG_ERROR("Unexpected output target type found: " << out.target.type().name());
+      return false;
+    }
+
+    return true;
+  }
+  //---------------------------------------------------------------
   std::string short_hash_str(const crypto::hash& h)
   {
     std::string res = string_tools::pod_to_hex(h);
@@ -536,13 +558,31 @@ namespace cryptonote
     return res;
   }
   //---------------------------------------------------------------
-  bool is_out_to_acc(const account_keys& acc, const txout_to_key& out_key, const crypto::public_key& tx_pub_key, size_t output_index)
+  void set_tx_out(const uint64_t amount, const crypto::public_key& output_public_key, const bool use_view_tags, const crypto::view_tag& view_tag, tx_out& out)
+  {
+    out.amount = amount;
+    if (use_view_tags)
+    {
+      txout_to_tagged_key ttk;
+      ttk.key = output_public_key;
+      ttk.view_tag = view_tag;
+      out.target = ttk;
+    }
+    else
+    {
+      txout_to_key tk;
+      tk.key = output_public_key;
+      out.target = tk;
+    }
+  }
+  //---------------------------------------------------------------
+  bool is_out_to_acc(const account_keys& acc, const crypto::public_key& output_public_key, const crypto::public_key& tx_pub_key, size_t output_index)
   {
     crypto::key_derivation derivation;
     generate_key_derivation(tx_pub_key, acc.m_view_secret_key, derivation);
     crypto::public_key pk;
     derive_public_key(derivation, output_index, acc.m_account_address.m_spend_public_key, pk);
-    return pk == out_key.key;
+    return pk == output_public_key;
   }
   //---------------------------------------------------------------
   bool lookup_acc_outs(const account_keys& acc, const transaction& tx, std::vector<size_t>& outs, uint64_t& money_transfered)
@@ -559,8 +599,9 @@ namespace cryptonote
     size_t i = 0;
     BOOST_FOREACH(const tx_out& o,  tx.vout)
     {
-      CHECK_AND_ASSERT_MES(o.target.type() ==  typeid(txout_to_key), false, "wrong type id in transaction out" );
-      if(is_out_to_acc(acc, boost::get<txout_to_key>(o.target), tx_pub_key, i))
+      crypto::public_key output_public_key;
+      CHECK_AND_ASSERT_MES(get_output_public_key(o, output_public_key), false, "unable to get output public key" );
+      if(is_out_to_acc(acc, output_public_key, tx_pub_key, i))
       {
         outs.push_back(i);
         money_transfered += o.amount;
